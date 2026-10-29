@@ -1,0 +1,11 @@
+{
+  "camera_serial": "",
+  "sdk_path": "/opt/MVS/Samples/64/Python/MvImport",
+  "output_dir": "/home/collector/Videos/slicing",
+  "codec": "auto",
+  "quality": 23,
+  "queue_frames": 32,
+  "min_free_gb": 2.0,
+  "preview_fps": 25,
+  "camera_settings": {}
+}
