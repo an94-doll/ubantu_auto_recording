@@ -112,14 +112,14 @@ class FakeCamera:
     def MV_CC_GetEnumValue(self, node, value):
         if node not in self.enums:
             return -1
-        value.nCurValue, value.nSupportedValue = self.enums[node]
-        value.nSupportedNum = len(value.nSupportedValue)
+        value.nCurValue, value.nSupportValue = self.enums[node]
+        value.nSupportedNum = len(value.nSupportValue)
         return 0
 
     def MV_CC_SetEnumValue(self, node, value):
         self.writes.append((node, value))
         self.events.append((node, value))
-        if node == "BalanceRatioSelector" and self.native_grabbing:
+        if node == "BalanceRatioSelector" and (self.native_grabbing or self.enums["BalanceWhiteAuto"][0] != 0):
             return 0x80000106  # This camera locks selector writes while streaming.
         if self.set_ret:
             return self.set_ret
@@ -187,6 +187,33 @@ class HikCameraTests(unittest.TestCase):
         info = self.camera.apply({"exposure_us": 1234.56})
         self.assertEqual(info.exposure_us, 1234.6)
         self.assertEqual(info.modes["gain_auto"], ["Off", "Continuous"])
+
+    def test_low_bandwidth_profile_sets_roi_and_rate(self):
+        self.camera.low_bandwidth_test = True
+        self.camera._sdk = fake_sdk()
+        native = self.camera._cam = FakeCamera()
+        native.ints["Width"] = [2048, 16, 2048, 2]
+        native.ints["Height"] = [1536, 16, 1536, 2]
+        self.camera._configure_full_frame()
+        self.assertEqual(native.ints["Width"][0], 640)
+        self.assertEqual(native.ints["Height"][0], 480)
+        self.assertEqual(native.floats["AcquisitionFrameRate"][0], 1.0)
+
+    def test_low_bandwidth_profile_rejects_unsupported_dimensions(self):
+        self.camera.low_bandwidth_test = True
+        with self.assertRaisesRegex(CameraError, "不支持测试尺寸"):
+            self.camera.open()
+        self.assertIsNone(self.camera._cam)
+
+    def test_low_bandwidth_profile_rejects_unsupported_rate(self):
+        self.camera.low_bandwidth_test = True
+        self.camera._sdk = fake_sdk()
+        native = self.camera._cam = FakeCamera()
+        native.ints["Width"] = [2048, 16, 2048, 2]
+        native.ints["Height"] = [1536, 16, 1536, 2]
+        native.floats["AcquisitionFrameRate"][1] = 2.0
+        with self.assertRaisesRegex(CameraError, "不支持 1 fps"):
+            self.camera._configure_full_frame()
 
     def test_owned_rgb_memory_and_buffer_release(self):
         self.camera.open()
@@ -263,6 +290,32 @@ class HikCameraTests(unittest.TestCase):
         self.assertEqual(info.balance_ratios["Red"], 1024.0)
         self.assertTrue(self.camera._grabbing)
         self.assertIsNotNone(self.camera.read())
+
+    def test_auto_white_balance_snapshot_does_not_write_locked_selector(self):
+        self.camera.open()
+        native = self.camera._cam
+        native.enums["BalanceWhiteAuto"][0] = 1
+        native.events.clear()
+        info = self.camera.snapshot()
+        self.assertEqual(info.balance_auto, "Continuous")
+        self.assertEqual(info.balance_ratios, {})
+        self.assertFalse(any(isinstance(e, tuple) and e[0] == "BalanceRatioSelector" for e in native.events))
+        self.assertEqual(native.enums["BalanceWhiteAuto"][0], 1)
+
+    def test_auto_to_manual_white_balance_with_saved_ratios(self):
+        self.camera.open()
+        self.camera._cam.enums["BalanceWhiteAuto"][0] = 1
+        info = self.camera.apply({"balance_auto": "Off", "balance_ratios": {"Red": 1200}})
+        self.assertEqual(info.balance_auto, "Off")
+        self.assertEqual(info.balance_ratios["Red"], 1200)
+
+    def test_invalid_manual_ratio_restores_auto_white_balance(self):
+        self.camera.open()
+        self.camera._cam.enums["BalanceWhiteAuto"][0] = 1
+        with self.assertRaisesRegex(CameraError, "超出相机范围"):
+            self.camera.apply({"balance_auto": "Off", "balance_ratios": {"Red": 999999}})
+        self.assertEqual(self.camera._cam.enums["BalanceWhiteAuto"][0], 1)
+        self.assertTrue(self.camera._grabbing)
 
     def test_nested_apply_snapshots_pause_only_once(self):
         self.camera.open()

@@ -8,6 +8,9 @@ from typing import Callable
 from .models import CameraInfo, Frame
 
 
+MAX_FRAME_GAP = 3
+
+
 class Recording:
     """Encoder thread owns the encoder; capture never waits on an overfull queue."""
 
@@ -24,6 +27,7 @@ class Recording:
         self.ready = threading.Event()
         self.stop_event = threading.Event()
         self.done = threading.Event()
+        self.warning = ""
         self.error = ""
         self.failure_kind = ""
         self.received = 0
@@ -50,10 +54,14 @@ class Recording:
                 self.failure_kind = "frame_loss"
                 return False
             if delta > 1:
-                self._capture_dropped += delta
-                self.error = f"检测到相机丢帧：缺少 {delta - 1} 帧"
-                self.failure_kind = "frame_loss"
-                return False
+                missing = delta - 1
+                self._capture_dropped += missing
+                if missing > MAX_FRAME_GAP:
+                    self._capture_dropped += 1  # Current valid frame is rejected on stop.
+                    self.error = f"检测到相机丢帧：缺少 {missing} 帧，超过单次容忍上限 {MAX_FRAME_GAP} 帧"
+                    self.failure_kind = "frame_loss"
+                    return False
+                self.warning = f"有丢帧，继续录制：最近缺少 {missing} 帧，累计缺失 {self._capture_dropped} 帧"
         self.last_sequence = frame.sequence
         try:
             self.queue.put_nowait(frame)

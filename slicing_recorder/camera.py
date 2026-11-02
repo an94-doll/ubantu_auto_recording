@@ -51,7 +51,8 @@ def _text(value: Any) -> str:
 
 
 class HikCamera:
-    def __init__(self, serial: str = "", sdk_path: str = ""):
+    def __init__(self, serial: str = "", sdk_path: str = "", *, low_bandwidth_test: bool = False):
+        self.low_bandwidth_test = low_bandwidth_test
         self.serial = serial
         self.sdk_path = sdk_path
         self._sdk = None
@@ -99,7 +100,7 @@ class HikCamera:
 
     @staticmethod
     def _supported(value) -> list[int]:
-        return [int(value.nSupportedValue[i]) for i in range(value.nSupportedNum)]
+        return [int(value.nSupportValue[i]) for i in range(value.nSupportedNum)]
 
     def _set_symbol(self, node: str, symbol: str, options: dict[str, int]) -> None:
         available = self._enum(node, True)
@@ -182,7 +183,12 @@ class HikCamera:
             value = self._int(node, True)
             increment = max(1, int(value.nInc))
             maximum = int(value.nMin) + ((int(value.nMax) - int(value.nMin)) // increment) * increment
-            self._set_int(node, maximum)
+            target = {"Width": 640, "Height": 480}[node] if self.low_bandwidth_test else maximum
+            if not value.nMin <= target <= value.nMax or (target - value.nMin) % increment:
+                raise CameraError(f"{node} 不支持测试尺寸 {target}")
+            self._set_int(node, target)
+            if self.low_bandwidth_test and self._int(node, True).nCurValue != target:
+                raise CameraError(f"{node} 测试尺寸读回不一致")
         pixels = self._enum("PixelFormat", True)
         supported = self._supported(pixels)
         names = ("PixelType_Gvsp_BayerGR8", "PixelType_Gvsp_BayerRG8",
@@ -198,14 +204,22 @@ class HikCamera:
             raise CameraError("相机未提供受支持的 Bayer8 / RGB8 / Mono8 像素格式。")
         self._set_enum("PixelFormat", selected)
         enabled = ct.c_bool()
-        if self._cam.MV_CC_GetBoolValue("AcquisitionFrameRateEnable", enabled) == 0:
+        enable_ret = self._cam.MV_CC_GetBoolValue("AcquisitionFrameRateEnable", enabled)
+        if self.low_bandwidth_test:
+            self._check(enable_ret, "读取帧率控制使能")
+        if enable_ret == 0:
             self._check(self._cam.MV_CC_SetBoolValue("AcquisitionFrameRateEnable", True), "启用帧率控制")
         self._fps_node = "AcquisitionFrameRate"
         rate = self._float(self._fps_node)
         if rate is None:
             self._fps_node = "AcquisitionFrameRateAbs"
             rate = self._float(self._fps_node, True)
-        self._check(self._cam.MV_CC_SetFloatValue(self._fps_node, float(rate.fMax)), "设置最高帧率")
+        target_fps = 1.0 if self.low_bandwidth_test else float(rate.fMax)
+        if self.low_bandwidth_test and not rate.fMin <= target_fps <= rate.fMax:
+            raise CameraError("相机不支持 1 fps 测试帧率")
+        self._check(self._cam.MV_CC_SetFloatValue(self._fps_node, target_fps), "设置采集帧率")
+        if self.low_bandwidth_test and not math.isclose(self._float(self._fps_node, True).fCurValue, target_fps, abs_tol=0.01):
+            raise CameraError("测试帧率读回不是 1 fps")
 
     @contextmanager
     def _parameter_access(self):
@@ -277,7 +291,9 @@ class HikCamera:
                                           str(value.nCurValue)))
                 info.modes[field] = [k for k, v in options.items() if v in self._supported(value)]
         selector = self._enum("BalanceRatioSelector")
-        if selector is not None:
+        # Automatic white balance can make the channel selector read-only.
+        # Leave automatic mode untouched; expose manual ratios after switching Off.
+        if selector is not None and info.balance_auto in (None, "Off"):
             try:
                 for channel, enum in (("Red", 0), ("Green", 1), ("Blue", 2)):
                     if enum not in self._supported(selector):
@@ -315,6 +331,15 @@ class HikCamera:
         ratios = settings.get("balance_ratios", {})
         if ratios and settings.get("balance_auto", before.balance_auto) not in (None, "Off"):
             raise CameraError("手动设置白平衡比例前请关闭自动白平衡")
+        if ratios and settings.get("balance_auto") == "Off" and before.balance_auto not in (None, "Off"):
+            # Saved manual settings can switch mode and apply ratios together.
+            # Re-read unlocked ranges before validating; roll back mode on failure.
+            self._set_symbol("BalanceWhiteAuto", "Off", self._auto_options("balance_auto"))
+            try:
+                return self._apply(settings)
+            except Exception:
+                self._set_symbol("BalanceWhiteAuto", before.balance_auto, self._auto_options("balance_auto"))
+                raise
         for channel, value in ratios.items():
             limits = before.ranges.get("balance_" + channel.lower())
             if channel not in before.balance_ratios or limits is None or not math.isfinite(float(value)) or not limits[0] <= float(value) <= limits[1]:

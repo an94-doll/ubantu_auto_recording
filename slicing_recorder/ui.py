@@ -25,6 +25,7 @@ STATE_LABELS = {
 STYLESHEET = """
 QMainWindow, QWidget#central { background: #f1f4f7; color: #172b3b; }
 QWidget { font-family: "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; font-size: 13px; }
+QLabel, QGroupBox { color: #172b3b; }
 QFrame#header { background: #162f40; border-radius: 9px; }
 QLabel#title { color: #ffffff; font-size: 23px; font-weight: 600; }
 QLabel#subtitle { color: #a9c4d2; font-size: 11px; letter-spacing: 1px; }
@@ -486,6 +487,8 @@ class MainWindow(QMainWindow):
             self._show_message("正在停止采集并关闭视频文件，请勿关闭电源。")
         elif error:
             self._show_message(error, True)
+        elif data.get("warning"):
+            self._show_message(str(data["warning"]), True)
         elif message:
             self._show_message(message)
         frame = self.controller.preview()

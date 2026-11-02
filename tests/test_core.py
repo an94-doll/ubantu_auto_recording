@@ -106,6 +106,34 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(list(self.directory.glob("*.mkv"))), 2)
         self.assertTrue((self.directory / "recordings.csv").read_bytes().startswith(b"\xef\xbb\xbf"))
 
+    def test_tolerated_gap_finishes_with_warning_in_csv(self):
+        inject = threading.Event()
+        class GapCamera(DemoCamera):
+            offset = 0
+            def read(self, timeout_ms=250):
+                f = super().read(timeout_ms)
+                if f is not None:
+                    if inject.is_set():
+                        self.offset += 3
+                        inject.clear()
+                    f.sequence += self.offset
+                return f
+        ctl = self.start_controller(lambda: GapCamera(64,48,100))
+        self.start_recording(ctl)
+        inject.set()
+        wait_for(lambda: ctl.snapshot()["dropped"] == 3)
+        self.assertEqual(ctl.snapshot()["state"], "recording")
+        self.assertTrue(ctl.snapshot()["warning"])
+        ctl.request_stop()
+        wait_for(lambda: ctl.snapshot()["state"] == "preview")
+        row = self.rows()[0]
+        self.assertEqual(row["status"], "completed_with_drops")
+        self.assertEqual(row["dropped_frames"], "3")
+        self.assertEqual(row["received_frames"], row["encoded_frames"])
+        self.assertIn("累计缺失 3",row["error"])
+        self.start_recording(ctl)
+        self.assertFalse(ctl.snapshot()["warning"])
+
     def test_capture_end_excludes_encoder_close_delay(self):
         close_started = threading.Event()
         release = threading.Event()
@@ -272,14 +300,44 @@ class RecordingTests(unittest.TestCase):
             self.assertEqual(rec.written, 2)
             self.assertEqual(rec.dropped, 1)
 
+    def test_small_gaps_continue_and_keep_valid_frames(self):
+        for missing in (1, 2, 3):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                rec = Recording(Path(directory) / "a.mkv", CameraInfo("m", "s", 64, 48, "RGB8", 100),
+                                "libx265", 23, 8, FakeEncoder)
+                self.assertTrue(rec.ready.wait(2))
+                try:
+                    for n in (1, 2 + missing, 3 + 2 * missing):
+                        self.assertTrue(rec.submit(frame(n)))
+                    self.assertEqual(rec.dropped, 2 * missing)
+                    self.assertTrue(rec.warning)
+                    self.assertFalse(rec.error)
+                finally:
+                    rec.stop()
+                    self.assertTrue(rec.done.wait(2))
+                self.assertEqual(rec.written, 3)
+
+    def test_repeat_reverse_and_wrap(self):
+        for first, second, allowed in ((10,10,False),(10,9,False),(0xffffffff,0,True)):
+            with self.subTest(first=first,second=second), tempfile.TemporaryDirectory() as directory:
+                rec = Recording(Path(directory) / "a.mkv", CameraInfo("m", "s", 64, 48, "RGB8", 100),
+                                "libx265", 23, 8, FakeEncoder)
+                self.assertTrue(rec.ready.wait(2))
+                try:
+                    self.assertTrue(rec.submit(frame(first)))
+                    self.assertEqual(rec.submit(frame(second)), allowed)
+                finally:
+                    rec.stop()
+                    self.assertTrue(rec.done.wait(2))
+
     def test_camera_gap_stops_and_counts_missing_and_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             rec = Recording(Path(directory) / "a.mkv", CameraInfo("m", "s", 64, 48, "RGB8", 100),
                             "libx265", 23, 4, FakeEncoder)
             self.assertTrue(rec.ready.wait(2))
             self.assertTrue(rec.submit(frame(1)))
-            self.assertFalse(rec.submit(frame(4)))
-            self.assertEqual(rec.dropped, 3)  # Missing 2,3; rejected current 4.
+            self.assertFalse(rec.submit(frame(6)))
+            self.assertEqual(rec.dropped, 5)  # Missing 2..5; rejected current 6.
             rec.stop()
             self.assertTrue(rec.done.wait(2))
 
@@ -288,6 +346,15 @@ class LauncherTests(unittest.TestCase):
     def test_filename_stays_inside_directory_and_within_utf8_limit(self):
         self.assertNotIn("/", safe_name("../trial/a"))
         self.assertLessEqual(len(safe_name("实验" * 100).encode("utf-8")), 180)
+
+    def test_autostart_explicit_conda_and_test_mode(self):
+        text = desktop_entry(PurePosixPath("/home/u/project"), PurePosixPath("/opt/MVS"),
+                             python=PurePosixPath("/home/u/conda/envs/recording/bin/python"),
+                             low_bandwidth_test=True)
+        self.assertIn('"RECORDER_PYTHON=/home/u/conda/envs/recording/bin/python"', text)
+        self.assertIn('"--low-bandwidth-test"', text)
+        self.assertNotIn("conda activate", text)
+        self.assertNotIn("--low-bandwidth-test", desktop_entry(PurePosixPath("/p"), PurePosixPath("/opt/MVS")))
 
     def test_autostart_does_not_use_shell_command_string(self):
         text = desktop_entry(PurePosixPath("/home/one two/采集"), PurePosixPath("/opt/MVS"), PurePosixPath("/home/u/a%b.json"))

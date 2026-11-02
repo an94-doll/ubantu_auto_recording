@@ -19,8 +19,14 @@ def exec_quote(value: str) -> str:
     return '"' + value + '"'
 
 
-def desktop_entry(root: Path, mvs_root: Path, config: Path | None = None) -> str:
-    command = ["/usr/bin/env", f"MVS_ROOT={mvs_root}", "/bin/bash", str(root / "scripts" / "run.sh")]
+def desktop_entry(root: Path, mvs_root: Path, config: Path | None = None, *,
+                  python: Path | None = None, low_bandwidth_test: bool = False) -> str:
+    command = ["/usr/bin/env", f"MVS_ROOT={mvs_root}"]
+    if python is not None:
+        command.append(f"RECORDER_PYTHON={python}")
+    command.extend(["/bin/bash", str(root / "scripts" / "run.sh")])
+    if low_bandwidth_test:
+        command.append("--low-bandwidth-test")
     if config is not None:
         command.extend(["--config", str(config)])
     return "\n".join([
@@ -37,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="仅打印启动项，不写入用户配置")
     parser.add_argument("--mvs-root", type=Path, default=Path("/opt/MVS"))
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--python", type=Path, help="指定 conda 等环境的 Python；默认项目 .venv")
+    parser.add_argument("--low-bandwidth-test", action="store_true", help="登录后以 640×480、1 fps 测试模式启动")
     args = parser.parse_args(argv)
     if sys.platform != "linux" and not args.dry_run:
         parser.error("桌面自启动安装仅用于 Linux，请在 Ubuntu 工控机执行")
@@ -50,12 +58,15 @@ def main(argv: list[str] | None = None) -> int:
             target.unlink(missing_ok=True)
             print(f"已移除：{target}")
         return 0
-    content = desktop_entry(root, args.mvs_root.resolve(), args.config.resolve() if args.config else None)
+    python = args.python.expanduser().absolute() if args.python else None
+    content = desktop_entry(root, args.mvs_root.resolve(), args.config.resolve() if args.config else None,
+                            python=python, low_bandwidth_test=args.low_bandwidth_test)
     if args.dry_run:
         print(content)
         return 0
-    if not (root / ".venv" / "bin" / "python").is_file():
-        parser.error("请先在项目中建立 .venv 并安装 requirements.txt")
+    executable = python or root / ".venv" / "bin" / "python"
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        parser.error(f"Python 不可执行：{executable}；请建立 .venv 或通过 --python 指定环境")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     print(f"已安装：{target}\n下次登录桌面后自动打开程序；不会自动录制。")

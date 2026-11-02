@@ -44,6 +44,26 @@ SDK 安装在其他位置时，使用 `MVS_ROOT=/实际/MVS目录 bash scripts/r
 
 完整依赖和编码硬件说明见 [DEPENDENCIES.md](DEPENDENCIES.md)。
 
+## USB 2.0 低带宽测试（conda recording）
+
+只验证连接、预览和低速录制流程时，显式启用真实相机测试模式：
+
+```bash
+conda activate recording
+cd /home/wangjr/projects/ubantu_auto_recording
+export MVCAM_COMMON_RUNENV=/opt/MVS/lib
+export LD_LIBRARY_PATH="/opt/MVS/lib/64:$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+python -m slicing_recorder --low-bandwidth-test --serial DB2982883 \
+  --sdk-path /opt/MVS/Samples/64/Python/MvImport
+```
+
+该模式使用 **640×480 ROI 裁剪、1 fps**，不是全幅缩放；窗口顶部会显示测试标识。
+默认配置独立保存为 `~/.config/slicing-recorder/low-bandwidth-test.json`，
+首次运行的保存目录为 `~/Videos/slicing-usb2-test`。不自动开始录制。
+启动时核对尺寸和帧率读回；不支持时明确报错，不自动退回高速配置。
+测试标志只对本次启动生效，重连仍沿用测试模式；下次不带该标志启动，恢复原有全幅、最高帧率行为。
+`scripts/run.sh` 默认使用项目 `.venv`；也可设置 `RECORDER_PYTHON` 指向 conda 环境的 Python。
+
 ## 日常采集
 
 1. 等待“预览中 · 可以录制”。相机未上电时每 3 秒重试连接。
@@ -69,6 +89,16 @@ python scripts/install_autostart.py
 ```
 
 它写入当前账户的 `~/.config/autostart/slicing-recorder.desktop`。下次登录桌面会打开界面、连接相机并恢复参数，**不会自动开始录制**。移动项目目录后需要重新执行安装脚本。
+
+使用本机 conda `recording` 环境并保持低带宽测试模式自启动：
+
+```bash
+/home/wangjr/miniconda3/envs/recording/bin/python scripts/install_autostart.py \
+  --python /home/wangjr/miniconda3/envs/recording/bin/python --low-bandwidth-test
+```
+
+启动项使用绝对 Python 路径并设置 SDK 和环境库路径，无需桌面登录时执行 `conda activate`。
+省略 `--low-bandwidth-test` 重新安装启动项，即恢复默认全幅模式；省略 `--python` 则仍使用项目 `.venv`。
 
 非默认 MVS 目录或配置文件：
 
@@ -111,7 +141,7 @@ CSV 为 UTF-8 BOM，便于 Excel 打开；表头使用固定英文名。每次�
 
 自动模式可能在录制中改变曝光、增益和白平衡，CSV 参数是**开始边界的快照**，不是整段视频的恒定值。需要可比较的固定设置时，请关闭自动模式。
 
-`normal` 表示正常停止并收尾；其他状态包括 `camera_disconnected`、`disk_low`、`disk_error`、`frame_loss`、`encoding_error`、`metadata_error`、`application_exit`、`empty`、`internal_error`。异常断电或强制终止可能留下 `recording`、空结束时间或空文件大小，应视为未正常完成，不能仅凭文件存在认定成功。
+`normal` 表示无检测到的丢帧且正常停止并收尾；`completed_with_drops` 表示容忍了帧号缺口后正常收尾，`error` 列记录缺帧说明；其他状态包括 `camera_disconnected`、`disk_low`、`disk_error`、`frame_loss`、`encoding_error`、`metadata_error`、`application_exit`、`empty`、`internal_error`。异常断电或强制终止可能留下 `recording`、空结束时间或空文件大小，应视为未正常完成，不能仅凭文件存在认定成功。
 
 视频 PTS 使用可读取频率的相机时钟；无法确定设备 tick 单位时，明确使用主机高分辨率接收时钟。缺帧间隔不会按固定帧号压缩，MKV 时间粒度通常为毫秒。主机接收时间不等于传感器曝光时刻。
 
@@ -120,7 +150,7 @@ CSV 为 UTF-8 BOM，便于 Excel 打开；表头使用固定英文名。每次�
 - “自动”实际试编码全尺寸帧，依次尝试 NVIDIA NVENC、Intel QSV、VAAPI，最后软件 `libx265`。采用的软件/硬件编码器和探测原因显示在状态栏；显式指定编码器失败时不回退。
 - 始终保持 H.265，不切换 H.264，不降低分辨率/帧率。质量值越小通常质量越高、文件越大；不同编码器的同一个数字不代表相同画质。输出经过 Bayer→RGB→YUV420 和有损编码，不是传感器原始像素存档。
 - 默认保留 2 GB 磁盘空间，每秒检查；空间不足时停止接收录制帧并尝试收尾。该余量不能替代磁盘容量规划或保障断电恢复。
-- 默认队列 32 帧，容量固定；2048×1536 RGB24 的队列像素约占 302 MB，另有 SDK、预览和编码器内存。队列满或检测到相机帧号缺口会报警并结束本次采集，不静默丢帧。
+- 默认队列 32 帧，容量固定；2048×1536 RGB24 的队列像素约占 302 MB，另有 SDK、预览和编码器内存。单次帧号缺口缺失 1–3 帧时持续显示告警、累计计数并保存后续有效帧；单次缺失 4 帧及以上、帧号重复/倒退或队列满仍报警并结束本次采集。3 帧是单次上限，不是整段累计上限；不补帧、不改变采集时间戳。
 - 断线后自动重连只恢复预览，不自动续录。已有 CSV 表头不匹配时拒绝录制，不改写原数据。
 
 队列大小、磁盘保留量和预览帧率可在程序关闭后编辑全局配置的 `queue_frames`、`min_free_gb`、`preview_fps`。扩大队列只能容纳短时波动，不能解决持续编码过慢。

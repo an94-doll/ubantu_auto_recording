@@ -163,7 +163,7 @@ class Controller:
         self._reason = "normal"
         self._end_time = ""
         self._update(state="saving", message="正在准备 H.265 编码器…", error="", output_file=str(path / filename),
-                     received=0, written=0, dropped=0, queue=0, duration_s=0.0, disk_free_gb=free)
+                     received=0, written=0, dropped=0, queue=0, duration_s=0.0, disk_free_gb=free, warning="")
 
     def _stop_recording(self, reason: str = "normal", error: str = "") -> None:
         rec = self._recording
@@ -204,7 +204,7 @@ class Controller:
         if first is not None:
             duration = max(0.0, (rec.last.timestamp_ns - first.timestamp_ns) / 1e9) if rec.last else 0.0
         self._update(received=rec.received, written=rec.written, dropped=rec.dropped,
-                     queue=rec.queue.qsize(), duration_s=duration)
+                     queue=rec.queue.qsize(), duration_s=duration, warning=rec.warning)
         if not rec.done.is_set():
             return
         if not self._end_time:
@@ -214,7 +214,10 @@ class Controller:
             status = rec.failure_kind or "encoding_error"
         if not first and status == "normal":
             status = "empty"
+        if status == "normal" and rec.dropped:
+            status = "completed_with_drops"
         error = rec.error
+        detail = error or (f"正常收尾，累计缺失 {rec.dropped} 帧（单次容忍上限 3 帧）" if status == "completed_with_drops" else "")
         try:
             if self._identity:
                 assert self._ledger is not None
@@ -225,14 +228,17 @@ class Controller:
                                     received_frames=rec.received, encoded_frames=rec.written,
                                     dropped_frames=rec.dropped,
                                     file_size_bytes=rec.path.stat().st_size if rec.path.exists() else 0,
-                                    status=status, error=error)
+                                    status=status, error=detail)
         except Exception as exc:
             error = f"{error}; CSV 收尾失败：{exc}".strip("; ")
         self._recording = None
         self._active = False
         self._ledger = None
         message = f"保存完成：{rec.path.name}" if not error and status == "normal" else f"本次采集结束（{status}）：{error}"
-        self._update(state="preview" if self._camera else "error", message=message, error=error)
+        if not error and status == "completed_with_drops":
+            message = f"保存完成（有丢帧）：{rec.path.name}；累计缺失 {rec.dropped} 帧"
+        self._update(state="preview" if self._camera else "error", message=message, error=error,
+                     warning=message if status == "completed_with_drops" and not error else "")
 
     def _command(self, name: str, args: tuple) -> None:
         if name == "stop":
